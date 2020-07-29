@@ -1,0 +1,9 @@
+# sample config file
+url: https://metadata.cloud.tibco.com
+basepath: /s/ienmnadebipc/ebx-ca-tabula/rest/v1
+dataspace: Tabula
+dataset: Tabula
+# auth token: token=$(echo -n '${user}:${password}' | base64)
+# auth header: "Authorization: Basic ${token}"
+ebxuser: <ebx tech user name>
+password: <ebx user password>

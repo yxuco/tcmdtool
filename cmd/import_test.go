@@ -13,8 +13,8 @@ var (
 )
 
 func init() {
-	url = "https://metadata.cloud.tibco.com/s/ienmnadebipc/ebx-ca-tabula/rest/v1"
-	authtoken = "ZWJ4LXl4dTpOLXU2VUhRIS1pdWNtZDFGUS1waXFuVDFnV0p6bzF5OQ=="
+	cfgFile = "../.tcmdtool"
+	initConfig()
 }
 
 func TestTCMDPostAsset(t *testing.T) {

@@ -60,6 +60,7 @@ func initConfig() {
 	if cfgFile != "" {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
+		viper.SetConfigType("yaml")
 	} else {
 		// Find home directory.
 		home, err := homedir.Dir()
@@ -103,6 +104,8 @@ func initConfig() {
 		if ds, ok := viper.Get("dataset").(string); ok {
 			TCDataset = ds
 		}
+	} else {
+		fmt.Printf("Viper failed to read config file %v\n", err)
 	}
 
 	// encode user:password to be used as service call header 'Authorization: Basic ${autotoken}'

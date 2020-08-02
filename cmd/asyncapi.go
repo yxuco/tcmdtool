@@ -27,7 +27,7 @@ func initializeAssetDataTypes() error {
 	AssetDataTypes = make(map[string]int)
 	basicTypes := []string{"string", "integer", "boolean", "array"}
 	for _, t := range basicTypes {
-		id, err := createAssetDataType(t, false)
+		id, err := findOrCreateAssetDataType(t, false)
 		if err != nil {
 			return err
 		}
@@ -36,55 +36,83 @@ func initializeAssetDataTypes() error {
 	return nil
 }
 
+func cleanAsyncAPISpec(spec interface{}) error {
+	if rid := getAsset(root); rid > 0 {
+		// remove root asset
+		fmt.Printf("cleanup asset %d -> %s\n", rid, root)
+		deleteAsset(rid)
+	}
+
+	if components := getRef(spec, "#/components"); components != nil {
+		cm, ok := components.(map[string]interface{})
+		if !ok {
+			return errors.Errorf("components type %T is not a map", components)
+		}
+		for cat, val := range cm {
+			om, ok := val.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for k := range om {
+				if tid := getAssetDataType(fmt.Sprintf("#/components/%s/%s", cat, k)); tid > 0 {
+					// remove asset data types
+					fmt.Printf("cleanup data type %d -> %s\n", tid, k)
+					deleteAssetDataType(tid)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func importAsyncAPISpec(spec map[string]interface{}) error {
-	//if err := expandComponents(spec); err != nil {
-	//	return errors.Wrap(err, "Faied to expand components")
-	//}
-	//data, _ := json.Marshal(spec)
-	//fmt.Println(string(data))
 	if err := initializeAssetDataTypes(); err != nil {
 		return err
 	}
 
-	rid, err := createRootAsset()
+	rid, err := createAsyncAPIAsset(spec)
 	if err != nil {
 		return nil
 	}
-	if id, ok := spec["id"]; ok {
-		createSimpleAsset("id", id.(string), rid)
-	}
 	if asyncapi, ok := spec["asyncapi"]; ok {
-		createSimpleAsset("asyncapi", asyncapi.(string), rid)
+		createSimpleAsset("asyncapi", asyncapi.(string), rid, "string")
+	}
+	if id, ok := spec["id"]; ok {
+		createSimpleAsset("id", id.(string), rid, "string")
 	}
 
 	if info, ok := spec["info"]; ok {
 		createInfoAsset(info, rid)
-	}
-	if externalDocs, ok := spec["externalDocs"]; ok {
-		createExternalDocsAsset(externalDocs, rid)
-	}
-	if tags, ok := spec["tags"]; ok {
-		createTagsAsset(tags, rid)
 	}
 
 	if components, ok := spec["components"]; ok {
 		createComponentsAsset(components, rid)
 	}
 
+	if servers, ok := spec["servers"]; ok {
+		createServersAsset(servers, rid)
+	}
+
 	if channels, ok := spec["channels"].(map[string]interface{}); ok {
 		createChannelsAsset(channels, rid)
 	}
 
-	if servers, ok := spec["servers"]; ok {
-		createServersAsset(servers, rid)
+	if tags, ok := spec["tags"]; ok {
+		createTagsAsset(tags, rid)
+	}
+
+	if externalDocs, ok := spec["externalDocs"]; ok {
+		createExternalDocsAsset(externalDocs, rid)
 	}
 	return nil
 }
 
-func createRootAsset() (int, error) {
+func createAsyncAPIAsset(doc map[string]interface{}) (int, error) {
+	comment := extractExtraProperties(doc, []string{"id", "asyncapi", "info", "externalDocs", "tags", "components", "channels", "servers"})
 	asset := Asset{
 		Name:                    root,
 		Label:                   root,
+		Comment:                 comment,
 		AssetType:               AssetTypes["JSON Element"],
 		DataElementAutoAssigned: false,
 		IsDisabled:              false,
@@ -92,7 +120,7 @@ func createRootAsset() (int, error) {
 	return createAsset(asset)
 }
 
-func createSimpleAsset(name, value string, parent int) (int, error) {
+func createSimpleAsset(name, value string, parent int, dataType string) (int, error) {
 	if len(value) == 0 {
 		// no value, so do not create it
 		return 0, nil
@@ -101,10 +129,12 @@ func createSimpleAsset(name, value string, parent int) (int, error) {
 		Name:                    name,
 		Label:                   name,
 		AssetType:               AssetTypes["JSON Element"],
-		AssetDataType:           strconv.Itoa(AssetDataTypes["string"]),
 		Comment:                 value,
 		DataElementAutoAssigned: false,
 		IsDisabled:              false,
+	}
+	if dataType == "string" {
+		asset.AssetDataType = strconv.Itoa(AssetDataTypes["string"])
 	}
 	if parent > 0 {
 		asset.Parent = strconv.Itoa(parent)
@@ -128,29 +158,13 @@ func createInfoAsset(info interface{}, parent int) error {
 	if err != nil {
 		return err
 	}
-	createSimpleAsset("version", getString(info, "#/version"), pid)
+	createSimpleAsset("version", getString(info, "#/version"), pid, "string")
 	if contact := getRef(info, "#/contact"); contact != nil {
-		createContactAsset(contact, pid)
+		if value, err := json.MarshalIndent(contact, "", "    "); err == nil {
+			createSimpleAsset("contact", string(value), pid, "")
+		}
 	}
 	return nil
-}
-
-func createContactAsset(contact interface{}, parent int) error {
-	comment := extractExtraProperties(contact.(map[string]interface{}), []string{"name"})
-	asset := Asset{
-		Name:                    getString(contact, "#/name"),
-		Label:                   "contact",
-		Comment:                 comment,
-		Parent:                  strconv.Itoa(parent),
-		AssetType:               AssetTypes["JSON Element"],
-		DataElementAutoAssigned: false,
-		IsDisabled:              false,
-	}
-	if len(asset.Name) == 0 {
-		asset.Name = "contact"
-	}
-	_, err := createAsset(asset)
-	return err
 }
 
 func createExternalDocsAsset(docs interface{}, parent int) error {
@@ -219,9 +233,6 @@ func createComponentsAsset(components interface{}, parent int) error {
 		return errors.Errorf("components type %T is not a map", components)
 	}
 	for cat, list := range cm {
-		if len(cat) == 0 {
-			continue
-		}
 		asset := Asset{
 			Name:                    cat,
 			Label:                   cat,
@@ -238,149 +249,80 @@ func createComponentsAsset(components interface{}, parent int) error {
 		if !ok {
 			continue
 		}
+		// create reusable data types
 		for k, v := range om {
-			name := fmt.Sprintf("#/components/%s/%s", cat, k)
-			createComponentAsset(v, name, cid)
-		}
-	}
-	return nil
-}
+			tid := setRef(fmt.Sprintf("#/components/%s/%s", cat, k))
 
-func createComponentAsset(component interface{}, name string, parent int) error {
-	// create or find reusable data type
-	tid := getAssetDataType(name)
-	typeExists := true
-	var err error
-	if tid == 0 {
-		if tid, err = createAssetDataType(name, true); err != nil {
-			return err
-		}
-		typeExists = false
-	}
-	AssetDataTypes[name] = tid
-
-	// create component
-	comment := extractExtraProperties(component.(map[string]interface{}), []string{"description", "properties", "type", "x-examples"})
-	label := name[strings.LastIndex(name, "/")+1:]
-	asset := Asset{
-		Name:                    label,
-		Label:                   label,
-		Description:             getString(component, "#/description"),
-		Comment:                 comment,
-		Parent:                  strconv.Itoa(parent),
-		AssetType:               AssetTypes["JSON Element"],
-		AssetDataType:           strconv.Itoa(tid),
-		DataElementAutoAssigned: false,
-		IsDisabled:              false,
-	}
-	pid, err := createAsset(asset)
-	if !typeExists {
-		// create component properties only if this is a new reusable asset
-		if props := getRef(component, "#/properties"); props != nil {
-			if pm, ok := props.(map[string]interface{}); ok {
-				for k, v := range pm {
-					createPropertyAsset(k, v, pid)
-				}
+			switch cat {
+			case "schemas":
+				createSchemaAsset(k, v, tid, cid, false)
+			case "messages":
+				createMessageAsset(k, v, tid, cid)
+			case "securitySchemes":
+				createSecuritySchemeAsset(k, v, tid, cid)
+			case "parameters":
+				createParameterAsset(k, v, tid, cid)
+			case "operationTraits":
+				createOperationTraitAsset(k, v, tid, cid)
+			case "messageTraits":
+				createMessageTraitAsset(k, v, tid, cid)
+			default:
+				fmt.Printf("component type %s not implemented", cat)
 			}
-		}
-	}
-	return err
-}
 
-func createPropertyAsset(name string, data interface{}, parent int) error {
-	props, ok := data.(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	ptype, ok := props["type"].(string)
-	if !ok {
-		return nil
-	}
-	var err error
-	// TODO: handle nested #ref in components
-	switch ptype {
-	case "object":
-		err = createObjectPropertyAsset(name, props, parent)
-	case "array":
-		err = createArrayPropertyAsset(name, props, parent)
-	default:
-		err = createPrimitivePropertyAsset(name, props, parent)
-	}
-	return err
-}
-
-func createPrimitivePropertyAsset(name string, data map[string]interface{}, parent int) error {
-	if tid, ok := AssetDataTypes[data["type"].(string)]; ok && tid > 0 {
-		comment := extractExtraProperties(data, []string{"description", "type", "x-examples"})
-		description := ""
-		if desc, ok := data["description"]; ok {
-			description = desc.(string)
 		}
-		asset := Asset{
-			Name:                    name,
-			Label:                   name,
-			Description:             description,
-			Comment:                 comment,
-			Parent:                  strconv.Itoa(parent),
-			AssetType:               AssetTypes["JSON Property"],
-			AssetDataType:           strconv.Itoa(tid),
-			DataElementAutoAssigned: false,
-			IsDisabled:              false,
-		}
-		_, err := createAsset(asset)
-		return err
 	}
 	return nil
 }
 
-func createObjectPropertyAsset(name string, data map[string]interface{}, parent int) error {
-	comment := extractExtraProperties(data, []string{"description", "properties", "type", "x-examples"})
-	description := ""
-	if desc, ok := data["description"]; ok {
-		description = desc.(string)
-	}
+func createSchemaAsset(name string, data interface{}, tid int, parent int, isProperty bool) error {
+	comment := extractExtraProperties(data.(map[string]interface{}), []string{"$ref", "description", "properties", "x-examples", "examples"})
 	asset := Asset{
 		Name:                    name,
 		Label:                   name,
-		Description:             description,
+		Description:             getString(data, "#/description"),
 		Comment:                 comment,
 		Parent:                  strconv.Itoa(parent),
-		AssetType:               AssetTypes["JSON Property"],
 		DataElementAutoAssigned: false,
 		IsDisabled:              false,
+	}
+	if isProperty {
+		asset.AssetType = AssetTypes["JSON Property"]
+	} else {
+		asset.AssetType = AssetTypes["JSON Element"]
+	}
+	dtid := tid
+	if tid == 0 {
+		// not a component type, so set primitive data type
+		dtype := getString(data, "#/type")
+		if len(dtype) > 0 && dtype != "object" {
+			if t, ok := AssetDataTypes[dtype]; ok {
+				dtid = t
+			}
+		}
+	}
+	if dtid > 0 {
+		asset.AssetDataType = strconv.Itoa(dtid)
 	}
 	pid, err := createAsset(asset)
 	if err != nil {
 		return err
 	}
 
-	// recursively create properties
-	if props, ok := data["properties"]; ok {
+	if props := getRef(data, "#/properties"); props != nil {
 		if pm, ok := props.(map[string]interface{}); ok {
 			for k, v := range pm {
-				createPropertyAsset(k, v, pid)
+				ctid := 0
+				if ref := getString(v, "#/$ref"); len(ref) > 0 {
+					ctid = setRef(ref)
+				}
+				//TODO: array type is assumed as simple primitive types
+				createSchemaAsset(k, v, ctid, pid, true)
+				//				createPropertyAsset(k, v, pid)
 			}
 		}
 	}
 	return nil
-}
-
-func createArrayPropertyAsset(name string, data map[string]interface{}, parent int) error {
-	tid := AssetDataTypes["array"]
-	// TODO: assume primitive array, need to process items for complex array
-	comment := extractExtraProperties(data, []string{"type"})
-	asset := Asset{
-		Name:                    name,
-		Label:                   name,
-		Comment:                 comment,
-		Parent:                  strconv.Itoa(parent),
-		AssetType:               AssetTypes["JSON Property"],
-		AssetDataType:           strconv.Itoa(tid),
-		DataElementAutoAssigned: false,
-		IsDisabled:              false,
-	}
-	_, err := createAsset(asset)
-	return err
 }
 
 // return JSON of data excluding specified properties
@@ -394,6 +336,9 @@ func extractExtraProperties(data map[string]interface{}, exclude []string) strin
 		if _, ok := exmap[k]; !ok {
 			result[k] = v
 		}
+	}
+	if len(result) == 0 {
+		return ""
 	}
 	props, _ := json.MarshalIndent(result, "", "    ")
 	return string(props)
@@ -422,9 +367,48 @@ func createChannelsAsset(channels map[string]interface{}, parent int) error {
 }
 
 func createChannelAsset(name string, channel interface{}, parent int) error {
+	props, ok := channel.(map[string]interface{})
+	if !ok {
+		return errors.Errorf("No properties for channel %s", name)
+	}
 	asset := Asset{
 		Name:                    name,
 		Label:                   name,
+		Description:             getString(channel, "#/description"),
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if ref := getString(channel, "#/$ref"); len(ref) > 0 {
+		if tid := setRef(ref); tid > 0 {
+			asset.AssetDataType = strconv.Itoa(tid)
+		}
+	}
+
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if params, ok := props["parameters"]; ok {
+		createParametersAsset(params, pid)
+	}
+
+	for _, op := range []string{"subscribe", "publish"} {
+		if val, ok := props[op]; ok {
+			createOperationAsset(op, val, pid)
+		}
+	}
+
+	//TODO: process channel binding object
+	return nil
+}
+
+func createParametersAsset(params interface{}, parent int) error {
+	asset := Asset{
+		Name:                    "parameters",
+		Label:                   "parameters",
 		Parent:                  strconv.Itoa(parent),
 		AssetType:               AssetTypes["JSON Element"],
 		DataElementAutoAssigned: false,
@@ -434,23 +418,57 @@ func createChannelAsset(name string, channel interface{}, parent int) error {
 	if err != nil {
 		return err
 	}
-
-	ops, ok := channel.(map[string]interface{})
-	if !ok {
-		return errors.Errorf("No operation for channel %s", name)
-	}
-	for k, v := range ops {
-		if err := createOperationAsset(k, v, pid); err != nil {
-			return err
+	if ps, ok := params.(map[string]interface{}); ok {
+		for k, v := range ps {
+			tid := 0
+			if ref := getString(v, "#/$ref"); len(ref) > 0 {
+				tid = setRef(ref)
+			}
+			createParameterAsset(k, v, tid, pid)
 		}
 	}
 	return nil
 }
 
-func createOperationAsset(name string, operation interface{}, parent int) error {
+func createParameterAsset(name string, parameter interface{}, tid int, parent int) error {
 	asset := Asset{
 		Name:                    name,
 		Label:                   name,
+		Description:             getString(parameter, "#/description"),
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if tid > 0 {
+		asset.AssetDataType = strconv.Itoa(tid)
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if loc := getString(parameter, "#/location"); len(loc) > 0 {
+		createSimpleAsset("location", loc, pid, "string")
+	}
+
+	if schema := getRef(parameter, "#/schema"); schema != nil {
+		tid := 0
+		if ref := getString(schema, "#/$ref"); len(ref) > 0 {
+			tid = setRef(ref)
+		}
+		createSchemaAsset("schema", schema, tid, pid, false)
+	}
+	return nil
+}
+
+func createOperationAsset(name string, operation interface{}, parent int) error {
+	comment := extractExtraProperties(operation.(map[string]interface{}), []string{"description", "tags", "externalDocs", "traits", "message", "bindings"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             getString(operation, "#/description"),
+		Comment:                 comment,
 		Parent:                  strconv.Itoa(parent),
 		AssetType:               AssetTypes["JSON Element"],
 		DataElementAutoAssigned: false,
@@ -461,60 +479,310 @@ func createOperationAsset(name string, operation interface{}, parent int) error 
 		return err
 	}
 
+	if tags := getRef(operation, "#/tags"); tags != nil {
+		createTagsAsset(tags, pid)
+	}
+
+	if externalDocs := getRef(operation, "#/externalDocs"); externalDocs != nil {
+		createExternalDocsAsset(externalDocs, pid)
+	}
+
+	if traits := getRef(operation, "#/traits"); traits != nil {
+		createOperationTraitsAsset(traits, pid)
+	}
+
 	if msg := getRef(operation, "#/message"); msg != nil {
-		comment := extractExtraProperties(msg.(map[string]interface{}), []string{"externalDocs", "description", "tags", "payload"})
-		description := ""
-		if desc := getString(msg, "#/description"); len(desc) > 0 {
-			description = desc
+		tid := 0
+		if ref := getString(msg, "#/$ref"); len(ref) > 0 {
+			tid = setRef(ref)
 		}
+		createMessageAsset("message", msg, tid, pid)
+	}
+	return nil
+}
+
+func createOperationTraitsAsset(traits interface{}, parent int) error {
+	ts, ok := traits.([]interface{})
+	if !ok {
+		return errors.Errorf("operation traits %T is not an array", traits)
+	}
+	asset := Asset{
+		Name:                    "traits",
+		Label:                   "traits",
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		AssetDataType:           strconv.Itoa(AssetDataTypes["array"]),
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	for i, trait := range ts {
+		name := fmt.Sprintf("trait-%d", i)
+		if nm := getString(trait, "#/name"); len(nm) > 0 {
+			name = nm
+		}
+		tid := 0
+		if ref := getString(trait, "#/$ref"); len(ref) > 0 {
+			tid = setRef(ref)
+			name = ref[strings.LastIndex(ref, "/")+1:]
+		}
+		createOperationTraitAsset(name, trait, tid, pid)
+	}
+	return nil
+}
+
+func createOperationTraitAsset(name string, trait interface{}, tid int, parent int) error {
+	comment := extractExtraProperties(trait.(map[string]interface{}), []string{"$ref", "externalDocs", "description", "tags", "bindings"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             getString(trait, "#/description"),
+		Comment:                 comment,
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if tid > 0 {
+		asset.AssetDataType = strconv.Itoa(tid)
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if externalDocs := getRef(trait, "#/externalDocs"); externalDocs != nil {
+		createExternalDocsAsset(externalDocs, pid)
+	}
+	if tags := getRef(trait, "#/tags"); tags != nil {
+		createTagsAsset(tags, pid)
+	}
+	if bindings := getRef(trait, "#/bindings"); bindings != nil {
+		if bv, err := json.MarshalIndent(bindings, "", "    "); err == nil {
+			createSimpleAsset("bindings", string(bv), pid, "")
+		}
+	}
+	return nil
+}
+
+func createMessageAsset(name string, message interface{}, tid int, parent int) error {
+	comment := extractExtraProperties(message.(map[string]interface{}), []string{"$ref", "headers", "correlationId", "externalDocs", "description", "tags", "payload", "bindings", "examples", "traits"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             getString(message, "#/description"),
+		Comment:                 comment,
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if tid > 0 {
+		asset.AssetDataType = strconv.Itoa(tid)
+	}
+	mid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if externalDocs := getRef(message, "#/externalDocs"); externalDocs != nil {
+		createExternalDocsAsset(externalDocs, mid)
+	}
+	if tags := getRef(message, "#/tags"); tags != nil {
+		createTagsAsset(tags, mid)
+	}
+	if payload := getRef(message, "#/payload"); payload != nil {
+		tid := 0
+		if ref := getString(payload, "#/$ref"); len(ref) > 0 {
+			tid = setRef(ref)
+		}
+		createSchemaAsset("payload", payload, tid, mid, false)
+	}
+
+	if traits := getRef(message, "#/traits"); traits != nil {
+		createMessageTraitsAsset(traits, mid)
+	}
+
+	//TODO: ignored headers, correlationId, bindings, examples
+	return nil
+}
+
+func createSecuritySchemeAsset(name string, data interface{}, tid int, parent int) error {
+	comment := extractExtraProperties(data.(map[string]interface{}), []string{"$ref", "description", "flows"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             getString(data, "#/description"),
+		Comment:                 comment,
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if tid > 0 {
+		asset.AssetDataType = strconv.Itoa(tid)
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if flows := getRef(data, "#/flows"); flows != nil {
+		createOAuthFlowsAsset(flows, pid)
+	}
+	return nil
+}
+
+func createOAuthFlowsAsset(flows interface{}, parent int) error {
+	asset := Asset{
+		Name:                    "flows",
+		Label:                   "flows",
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	fm, ok := flows.(map[string]interface{})
+	if !ok {
+		return errors.Errorf("flows %T is not a map", flows)
+	}
+
+	for k, v := range fm {
+		comment := extractExtraProperties(v.(map[string]interface{}), []string{"scopes"})
 		asset := Asset{
-			Name:                    "message",
-			Label:                   "message",
-			Description:             description,
+			Name:                    k,
+			Label:                   k,
 			Comment:                 comment,
 			Parent:                  strconv.Itoa(pid),
 			AssetType:               AssetTypes["JSON Element"],
 			DataElementAutoAssigned: false,
 			IsDisabled:              false,
 		}
-		mid, err := createAsset(asset)
+		fid, err := createAsset(asset)
 		if err != nil {
-			return err
+			continue
 		}
-
-		if externalDocs := getRef(msg, "#/externalDocs"); externalDocs != nil {
-			createExternalDocsAsset(externalDocs, mid)
-		}
-		if tags := getRef(msg, "#/tags"); tags != nil {
-			createTagsAsset(tags, mid)
-		}
-		if payload := getRef(msg, "#/payload"); payload != nil {
-			createPayloadAsset(payload, mid)
+		if scopes := getRef(v, "#/scopes"); scopes != nil {
+			createOAuthFlowScopesAsset(scopes, fid)
 		}
 	}
 	return nil
 }
 
-// TODO: assumes payload is predefined in components, which may not be true
-func createPayloadAsset(payload interface{}, parent int) error {
-	if ref := getString(payload, "#/$ref"); len(ref) > 0 {
-		tid, ok := AssetDataTypes[ref]
-		if !ok {
-			return errors.Errorf("payload ref %s is not defined", ref)
-		}
-		asset := Asset{
-			Name:                    "payload",
-			Label:                   "payload",
-			Parent:                  strconv.Itoa(parent),
-			AssetType:               AssetTypes["JSON Element"],
-			AssetDataType:           strconv.Itoa(tid),
-			DataElementAutoAssigned: false,
-			IsDisabled:              false,
-		}
-		_, err := createAsset(asset)
+func createOAuthFlowScopesAsset(scopes interface{}, parent int) error {
+	asset := Asset{
+		Name:                    "scopes",
+		Label:                   "scopes",
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
 		return err
 	}
-	return errors.New("payload is not $ref, which is not implemented")
+
+	sm, ok := scopes.(map[string]interface{})
+	if !ok {
+		return errors.Errorf("flow scopes %T is not a map", scopes)
+	}
+
+	for k, v := range sm {
+		createSimpleAsset(k, v.(string), pid, "string")
+	}
+	return nil
+}
+
+// set asset data type for a ref name, create the type if necessary.
+// return type id if succesful, 0 otherwise
+func setRef(ref string) int {
+	tid, ok := AssetDataTypes[ref]
+	var err error
+	if !ok {
+		if tid, err = findOrCreateAssetDataType(ref, true); err != nil {
+			return 0
+		}
+		AssetDataTypes[ref] = tid
+	}
+	return tid
+}
+
+func createMessageTraitsAsset(traits interface{}, parent int) error {
+	ts, ok := traits.([]interface{})
+	if !ok {
+		return errors.Errorf("message traits %T is not an array", traits)
+	}
+	asset := Asset{
+		Name:                    "traits",
+		Label:                   "traits",
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		AssetDataType:           strconv.Itoa(AssetDataTypes["array"]),
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	for i, trait := range ts {
+		name := fmt.Sprintf("trait-%d", i)
+		if nm := getString(trait, "#/name"); len(nm) > 0 {
+			name = nm
+		}
+		tid := 0
+		if ref := getString(trait, "#/$ref"); len(ref) > 0 {
+			tid = setRef(ref)
+			name = ref[strings.LastIndex(ref, "/")+1:]
+		}
+		createMessageTraitAsset(name, trait, tid, pid)
+	}
+	return nil
+}
+
+func createMessageTraitAsset(name string, trait interface{}, tid int, parent int) error {
+	comment := extractExtraProperties(trait.(map[string]interface{}), []string{"$ref", "headers", "correlationId", "externalDocs", "description", "tags", "bindings", "examples"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             getString(trait, "#/description"),
+		Comment:                 comment,
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	if tid > 0 {
+		asset.AssetDataType = strconv.Itoa(tid)
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if externalDocs := getRef(trait, "#/externalDocs"); externalDocs != nil {
+		createExternalDocsAsset(externalDocs, pid)
+	}
+	if tags := getRef(trait, "#/tags"); tags != nil {
+		createTagsAsset(tags, pid)
+	}
+	if headers := getRef(trait, "#/headers"); headers != nil {
+		createSchemaAsset("headers", headers, 0, pid, false)
+	}
+
+	//TODO: ignored correlationId, bindings, examples
+	return nil
 }
 
 func createServersAsset(servers interface{}, parent int) error {
@@ -533,21 +801,105 @@ func createServersAsset(servers interface{}, parent int) error {
 
 	for k, v := range servers.(map[string]interface{}) {
 		if svr, ok := v.(map[string]interface{}); ok {
-			comment := extractExtraProperties(svr, []string{"description"})
-			asset := Asset{
-				Name:                    k,
-				Label:                   k,
-				Description:             svr["description"].(string),
-				Comment:                 comment,
-				Parent:                  strconv.Itoa(pid),
-				AssetType:               AssetTypes["JSON Element"],
-				DataElementAutoAssigned: false,
-				IsDisabled:              false,
-			}
-			if _, err := createAsset(asset); err != nil {
+			err := createServerAsset(k, svr, pid)
+			if err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func createServerAsset(name string, server map[string]interface{}, parent int) error {
+	comment := extractExtraProperties(server, []string{"description", "security", "bindings"})
+	asset := Asset{
+		Name:                    name,
+		Label:                   name,
+		Description:             server["description"].(string),
+		Comment:                 comment,
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if security, ok := server["security"]; ok {
+		createSecurityRequirementAsset(security, pid)
+	}
+
+	// TODO: handle server binding
+	return nil
+}
+
+// server security requirement lists security schemes and scopes defined in #/components/securitySchemes
+func createSecurityRequirementAsset(security interface{}, parent int) error {
+	asset := Asset{
+		Name:                    "security",
+		Label:                   "security",
+		Parent:                  strconv.Itoa(parent),
+		AssetType:               AssetTypes["JSON Element"],
+		AssetDataType:           strconv.Itoa(AssetDataTypes["array"]),
+		DataElementAutoAssigned: false,
+		IsDisabled:              false,
+	}
+	pid, err := createAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	if schemes, ok := security.([]interface{}); ok {
+		for _, s := range schemes {
+			createSecurityRequirementScheme(s, pid)
+		}
+	}
+	return nil
+}
+
+func createSecurityRequirementScheme(scheme interface{}, parent int) error {
+	s, ok := scheme.(map[string]interface{})
+	if !ok {
+		return errors.Errorf("security requirement scheme %T is not a map", scheme)
+	}
+	for k, v := range s {
+		asset := Asset{
+			Name:                    k,
+			Label:                   k,
+			Parent:                  strconv.Itoa(parent),
+			AssetType:               AssetTypes["JSON Property"],
+			AssetDataType:           strconv.Itoa(AssetDataTypes["array"]),
+			DataElementAutoAssigned: false,
+			IsDisabled:              false,
+		}
+		pid, err := createAsset(asset)
+		if err != nil {
+			return err
+		}
+		createSecurityRequirementSchemeScopes(v, pid)
+	}
+	return nil
+}
+
+func createSecurityRequirementSchemeScopes(scopes interface{}, parent int) error {
+	ss, ok := scopes.([]interface{})
+	if !ok {
+		return errors.Errorf("security requirement scheme scope %T is not an array", scopes)
+	}
+	for _, scope := range ss {
+		name := fmt.Sprintf("%s", scope)
+		asset := Asset{
+			Name:                    name,
+			Label:                   name,
+			Parent:                  strconv.Itoa(parent),
+			AssetType:               AssetTypes["JSON Property"],
+			AssetDataType:           strconv.Itoa(AssetDataTypes["string"]),
+			DataElementAutoAssigned: false,
+			IsDisabled:              false,
+		}
+		createAsset(asset)
 	}
 	return nil
 }

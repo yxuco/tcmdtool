@@ -161,13 +161,17 @@ func getAssetDataType(dataType string) int {
 	return 0
 }
 
-// create or find asset datatype by name, and return the ID
-func createAssetDataType(dataType string, complexType bool) (int, error) {
+// find or create asset datatype by name, and return the ID
+func findOrCreateAssetDataType(dataType string, complexType bool) (int, error) {
 	tid := getAssetDataType(dataType)
 	if tid > 0 {
 		return tid, nil
 	}
+	return createAssetDataType(dataType, complexType)
+}
 
+// create new asset datatype by name, and return the ID
+func createAssetDataType(dataType string, complexType bool) (int, error) {
 	// create asset data type
 	path := fmt.Sprintf("%s/%s/datatype", TCDataspace, TCDataset)
 	data := DataType{

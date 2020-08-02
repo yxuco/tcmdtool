@@ -29,3 +29,8 @@ func importAPIPaths(spec map[string]interface{}) error {
 	}
 	return nil
 }
+
+func cleanOpenAPISpec(spec interface{}) error {
+	fmt.Println("clean OpenAPI spec not implemented")
+	return nil
+}

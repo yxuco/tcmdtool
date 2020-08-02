@@ -50,7 +50,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is .tcmdtool)")
-	rootCmd.PersistentFlags().StringVar(&url, "url", "", "TCMD REST API URL of format https://${host}${basepath}/${dataspace}/${dataset}")
+	rootCmd.PersistentFlags().StringVar(&url, "url", "", "TCMD REST API URL, e.g., https://metadata.cloud.tibco.com/s/ienmnadebipc/ebx-ca-tabula/rest/v1")
 	rootCmd.PersistentFlags().StringVarP(&user, "user", "u", "", "TCMD technical user to invoke REST API")
 	rootCmd.PersistentFlags().StringVarP(&password, "password", "p", "", "Password of TCMD technical user to invoke REST API")
 }

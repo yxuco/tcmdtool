@@ -23,8 +23,8 @@ import (
 // cleanCmd represents the clean command
 var cleanCmd = &cobra.Command{
 	Use:   "clean",
-	Short: "Cleanup an API spec to TCMD",
-	Long:  `Cleanup an API spec to TCMD`,
+	Short: "Cleanup an API spec in TCMD",
+	Long:  `Cleanup an API spec in TCMD`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("clean", input)
 		data, err := ioutil.ReadFile(input)

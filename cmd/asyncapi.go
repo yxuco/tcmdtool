@@ -20,11 +20,19 @@ var AssetTypes = map[string]string{
 	"JSON Property": "25",
 }
 
-// AssetDataTypes maps dataType --> ID
-var AssetDataTypes map[string]int
+var (
+	// AssetDataTypes maps dataType --> ID
+	AssetDataTypes map[string]int
+	// AssetDataTypeIDs maps ID --> dataType
+	AssetDataTypeIDs map[int]string
+)
+
+func init() {
+	AssetDataTypes = make(map[string]int)
+	AssetDataTypeIDs = make(map[int]string)
+}
 
 func initializeAssetDataTypes() error {
-	AssetDataTypes = make(map[string]int)
 	basicTypes := []string{"string", "integer", "boolean", "array"}
 	for _, t := range basicTypes {
 		id, err := findOrCreateAssetDataType(t, false)
@@ -1027,4 +1035,562 @@ func getString(node interface{}, ref string) string {
 	}
 
 	return fmt.Sprintf("%v", v)
+}
+
+func exportAsyncAPISpec(name string) (interface{}, error) {
+	spec := make(map[string]interface{})
+	asset, err := getAssetByName(name)
+	if err != nil {
+		return nil, errors.Wrapf(err, "Failed to find root asset %s", name)
+	}
+
+	if len(asset.Comment) > 0 {
+		extractComment(asset.Comment, spec)
+	}
+
+	if children, err := getChildrenAsset(asset.ID); err == nil {
+		for _, child := range children {
+			switch child.Label {
+			case "asyncapi", "id":
+				extractSimpleAsset(&child, spec)
+			case "info":
+				extractInfoAsset(&child, spec)
+			case "components":
+				extractComponentsAsset(&child, spec)
+			case "servers":
+				extractServersAsset(&child, spec)
+			case "channels":
+				extractChannelsAsset(&child, spec)
+			case "tags":
+				extractTagsAsset(&child, spec)
+			case "externalDocs":
+				extractExternalDocsAsset(&child, spec)
+			default:
+				fmt.Println("Unknown child element", child.Label)
+			}
+		}
+	}
+	return spec, nil
+}
+
+func extractSimpleAsset(child *Asset, parent map[string]interface{}) error {
+	dataType := ""
+	if len(child.AssetDataType) > 0 {
+		if tid, err := strconv.Atoi(child.AssetDataType); err == nil {
+			dataType = getTypeRef(tid)
+		}
+	}
+	if dataType == "string" {
+		// simple string vaule
+		parent[child.Label] = child.Comment
+	} else {
+		// complex object
+		var value interface{}
+		if err := json.Unmarshal([]byte(child.Comment), &value); err == nil {
+			parent[child.Label] = value
+		}
+	}
+	return nil
+}
+
+func extractInfoAsset(child *Asset, parent map[string]interface{}) error {
+	info := make(map[string]interface{})
+	parent["info"] = info
+
+	if len(child.Description) > 0 {
+		info["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, info)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "version", "contact":
+				extractSimpleAsset(&c, info)
+			default:
+				fmt.Println("Unknown child element", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractExternalDocsAsset(child *Asset, parent map[string]interface{}) error {
+	docs := make(map[string]interface{})
+	parent["externalDocs"] = docs
+
+	if len(child.Description) > 0 {
+		docs["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, docs)
+	}
+	return nil
+}
+
+func extractTagsAsset(child *Asset, parent map[string]interface{}) error {
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		tags := make([]interface{}, 0, len(children))
+		for _, c := range children {
+			tag := map[string]string{
+				"name": c.Label,
+			}
+			if len(c.Description) > 0 {
+				tag["description"] = c.Description
+			}
+			tags = append(tags, tag)
+		}
+		parent["tags"] = tags
+	}
+	return nil
+}
+
+func extractServersAsset(child *Asset, parent map[string]interface{}) error {
+	servers := make(map[string]interface{})
+	parent["servers"] = servers
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			extractServerAsset(&c, servers)
+		}
+	}
+	return nil
+}
+
+func extractServerAsset(child *Asset, parent map[string]interface{}) error {
+	server := make(map[string]interface{})
+	if len(child.Description) > 0 {
+		server["description"] = child.Description
+	}
+	parent[child.Label] = server
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, server)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			if c.Label == "security" {
+				extractSecurityRequirementAsset(&c, server)
+			} else {
+				fmt.Printf("server child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractSecurityRequirementAsset(child *Asset, parent map[string]interface{}) error {
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		security := make([]interface{}, 0, len(children))
+		for _, c := range children {
+			s := make(map[string]interface{})
+			extractSecurityRequirementScopes(&c, s)
+			security = append(security, s)
+		}
+		parent["security"] = security
+	}
+	return nil
+}
+
+func extractSecurityRequirementScopes(child *Asset, parent map[string]interface{}) error {
+	scopes := make([]string, 0)
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			scopes = append(scopes, c.Label)
+		}
+	}
+	parent[child.Label] = scopes
+	return nil
+}
+
+func extractChannelsAsset(child *Asset, parent map[string]interface{}) error {
+	channels := make(map[string]interface{})
+	parent["channels"] = channels
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			extractChannelAsset(&c, channels)
+		}
+	}
+	return nil
+}
+
+// set $ref in a node if an asset has data type ref to a component.
+// return true if $ref is set
+func setComponentRef(asset *Asset, node map[string]interface{}) bool {
+	dataType := ""
+	if len(asset.AssetDataType) > 0 {
+		if tid, err := strconv.Atoi(asset.AssetDataType); err == nil {
+			dataType = getTypeRef(tid)
+		}
+	}
+	if strings.HasPrefix(dataType, "#/components") {
+		node["$ref"] = dataType
+		return true
+	}
+	return false
+}
+
+func extractChannelAsset(child *Asset, parent map[string]interface{}) error {
+	channel := make(map[string]interface{})
+	parent[child.Label] = channel
+
+	if ok := setComponentRef(child, channel); ok {
+		return nil
+	}
+	if len(child.Description) > 0 {
+		channel["description"] = child.Description
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "parameters":
+				extractParametersAsset(&c, channel)
+			case "subscribe", "publish":
+				extractOperationAsset(&c, channel)
+			default:
+				fmt.Printf("channel child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractParametersAsset(child *Asset, parent map[string]interface{}) error {
+	parameters := make(map[string]interface{})
+	parent["parameters"] = parameters
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			extractParameterAsset(&c, parameters, false)
+		}
+	}
+	return nil
+}
+
+func extractParameterAsset(child *Asset, parent map[string]interface{}, isComponent bool) error {
+	parameter := make(map[string]interface{})
+	parent[child.Label] = parameter
+
+	if !isComponent {
+		if ok := setComponentRef(child, parameter); ok {
+			return nil
+		}
+	}
+	if len(child.Description) > 0 {
+		parameter["description"] = child.Description
+	}
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "location":
+				extractSimpleAsset(&c, parameter)
+			case "schema":
+				extractSchemaAsset(&c, parameter, false)
+			default:
+				fmt.Printf("channel child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractSchemaAsset(child *Asset, parent map[string]interface{}, isComponent bool) error {
+	schema := make(map[string]interface{})
+	parent[child.Label] = schema
+
+	if !isComponent {
+		if ok := setComponentRef(child, schema); ok {
+			return nil
+		}
+	}
+	if len(child.Description) > 0 {
+		schema["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, schema)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil && children != nil && len(children) > 0 {
+		properties := make(map[string]interface{})
+		schema["properties"] = properties
+		for _, c := range children {
+			extractSchemaAsset(&c, properties, false)
+		}
+	}
+	return nil
+}
+
+func extractOperationAsset(child *Asset, parent map[string]interface{}) error {
+	operation := make(map[string]interface{})
+	parent[child.Label] = operation
+
+	if len(child.Description) > 0 {
+		operation["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, operation)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "tags":
+				extractTagsAsset(&c, operation)
+			case "externalDocs":
+				extractExternalDocsAsset(&c, operation)
+			case "message":
+				extractMessageAsset(&c, operation, false)
+			case "traits":
+				extractTraitsAsset(&c, operation, "operation")
+			default:
+				fmt.Printf("operation child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractMessageAsset(child *Asset, parent map[string]interface{}, isComponent bool) error {
+	message := make(map[string]interface{})
+	parent[child.Label] = message
+
+	if !isComponent {
+		if ok := setComponentRef(child, message); ok {
+			return nil
+		}
+	}
+
+	if len(child.Description) > 0 {
+		message["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, message)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "tags":
+				extractTagsAsset(&c, message)
+			case "externalDocs":
+				extractExternalDocsAsset(&c, message)
+			case "payload":
+				extractSchemaAsset(&c, message, false)
+			case "traits":
+				extractTraitsAsset(&c, message, "message")
+			default:
+				fmt.Printf("message child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractTraitsAsset(child *Asset, parent map[string]interface{}, traitType string) error {
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		traits := make([]interface{}, 0, len(children))
+		for _, c := range children {
+			trait := make(map[string]interface{})
+			switch traitType {
+			case "operation":
+				extractOperationTraitAsset(&c, trait, false)
+			case "message":
+				extractMessageTraitAsset(&c, trait, false)
+			default:
+				fmt.Printf("trait type %s is not implemented\n", traitType)
+			}
+			traits = append(traits, trait)
+		}
+		parent["traits"] = traits
+	}
+	return nil
+}
+
+func extractOperationTraitAsset(child *Asset, trait map[string]interface{}, isComponent bool) error {
+	if !isComponent {
+		if ok := setComponentRef(child, trait); ok {
+			return nil
+		}
+	}
+
+	if len(child.Description) > 0 {
+		trait["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, trait)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "tags":
+				extractTagsAsset(&c, trait)
+			case "externalDocs":
+				extractExternalDocsAsset(&c, trait)
+			case "bindings":
+				extractSimpleAsset(&c, trait)
+			default:
+				fmt.Printf("operation trait child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractMessageTraitAsset(child *Asset, trait map[string]interface{}, isComponent bool) error {
+	if !isComponent {
+		if ok := setComponentRef(child, trait); ok {
+			return nil
+		}
+	}
+
+	if len(child.Description) > 0 {
+		trait["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, trait)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "tags":
+				extractTagsAsset(&c, trait)
+			case "externalDocs":
+				extractExternalDocsAsset(&c, trait)
+			case "headers":
+				extractSchemaAsset(&c, trait, false)
+			default:
+				fmt.Printf("message trait child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractComponentsAsset(child *Asset, parent map[string]interface{}) error {
+	components := make(map[string]interface{})
+	parent[child.Label] = components
+
+	categories, err := getChildrenAsset(child.ID)
+	if err != nil {
+		return errors.Wrap(err, "Failed to fetch component categories")
+	}
+	for _, cat := range categories {
+		category := make(map[string]interface{})
+		comps, err := getChildrenAsset(cat.ID)
+		if err != nil {
+			fmt.Println("Failed to fetch components of category", cat.Label)
+			continue
+		}
+		components[cat.Label] = category
+		for _, c := range comps {
+			switch cat.Label {
+			case "schemas":
+				extractSchemaAsset(&c, category, true)
+			case "messages":
+				extractMessageAsset(&c, category, true)
+			case "securitySchemes":
+				extractSecuritySchemeAsset(&c, category)
+			case "parameters":
+				extractParameterAsset(&c, category, true)
+			case "operationTraits":
+				trait := make(map[string]interface{})
+				category[c.Label] = trait
+				extractOperationTraitAsset(&c, trait, true)
+			case "messageTraits":
+				trait := make(map[string]interface{})
+				category[c.Label] = trait
+				extractMessageTraitAsset(&c, trait, true)
+			default:
+				fmt.Printf("component type %s is not implemented\n", cat.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractSecuritySchemeAsset(child *Asset, parent map[string]interface{}) error {
+	scheme := make(map[string]interface{})
+	parent[child.Label] = scheme
+
+	if len(child.Description) > 0 {
+		scheme["description"] = child.Description
+	}
+	if len(child.Comment) > 0 {
+		extractComment(child.Comment, scheme)
+	}
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			switch c.Label {
+			case "flows":
+				extractOAuthFlowsAsset(&c, scheme)
+			default:
+				fmt.Printf("security scheme child type %s is not implemented\n", c.Label)
+			}
+		}
+	}
+	return nil
+}
+
+func extractOAuthFlowsAsset(child *Asset, parent map[string]interface{}) error {
+	flows := make(map[string]interface{})
+	parent["flows"] = flows
+
+	children, err := getChildrenAsset(child.ID)
+	if err != nil {
+		return errors.Wrap(err, "Failed to fetch OAuth flows")
+	}
+	for _, c := range children {
+		flow := make(map[string]interface{})
+		flows[c.Label] = flow
+		if len(c.Comment) > 0 {
+			extractComment(c.Comment, flow)
+		}
+		if scopes, err := getChildrenAsset(c.ID); err == nil && scopes != nil && len(scopes) > 0 {
+			extractOAuthFlowScopesAsset(&scopes[0], flow)
+		}
+	}
+	return nil
+}
+
+func extractOAuthFlowScopesAsset(child *Asset, parent map[string]interface{}) error {
+	scopes := make(map[string]interface{})
+	parent["scopes"] = scopes
+
+	if children, err := getChildrenAsset(child.ID); err == nil {
+		for _, c := range children {
+			extractSimpleAsset(&c, scopes)
+		}
+	}
+	return nil
+}
+
+func getTypeRef(id int) string {
+	if result, ok := AssetDataTypeIDs[id]; ok {
+		return result
+	}
+	dataType, err := getAssetDataTypeByID(id)
+	if err != nil {
+		return ""
+	}
+	fmt.Printf("cache dataType %d => %s\n", id, dataType.Label)
+	AssetDataTypeIDs[id] = dataType.Label
+	return dataType.Label
+}
+
+func extractComment(comment string, parent map[string]interface{}) error {
+	content := make(map[string]interface{})
+	if err := json.Unmarshal([]byte(comment), &content); err != nil {
+		return nil
+	}
+	for k, v := range content {
+		parent[k] = v
+	}
+	return nil
 }
